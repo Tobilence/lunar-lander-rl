@@ -13,9 +13,9 @@ LUNAR_LANDER_ACTION_SPACE_SIZE = 4
 
 ## Hyperparameters
 BUFFER_SIZE = 1000
-EPISODES = 3
-LEARNING_START_STEP = 10
-MINI_BATCH_SIZE = 10
+EPISODES = 25
+LEARNING_START_STEP = 100
+MINI_BATCH_SIZE = 64
 DISCOUNT_FACTOR = 0.99
 STEP_SIZE = 1e-3
 NEURAL_NETWORK_UPDATE_STEP = 1000
@@ -42,8 +42,6 @@ def run_landing(episodes=5, render=True):
 
     epsilon = 0.5  # this should initially be high and then decay --> todo
     total_steps = 0
-
-    rngs = nnx.Rngs(0)
 
     for episode in range(EPISODES):
         # Reset returns (observation, info)
@@ -75,33 +73,35 @@ def run_landing(episodes=5, render=True):
                 _, state = nnx.split(agent.active_network)
                 accumulated_grads = jax.tree.map(lambda x: jnp.zeros_like(x), state)
 
-                for b in m_batch:
-                    if b.next_state_is_terminal:
-                        y = b.reward
-                    else:
-                        y = b.reward + ( DISCOUNT_FACTOR * max(agent.eval_network(b.next_state)) )
-                    
-                    # use y to calculate the gradient (todo)
-                    grad_fn = nnx.value_and_grad(rmse_loss, has_aux=True)
-                    (_, qs), grad = grad_fn(agent.active_network, b.state, b.action, y)
-                    eval_action_value = qs[action]
-                    
-                    accumulated_grads = jax.tree.map(lambda total, new: total + new, accumulated_grads, grad)
+                ## batched inference and gradient update
+                states = jnp.stack([b.state for b in m_batch])
+                actions = jnp.array([b.action for b in m_batch])
+                next_states = jnp.stack([b.next_state for b in m_batch])
                 
-                # update the neural network with the resulting gradient
+                qs = agent.active_network(states)
+                eval_qs = agent.eval_network(next_states)
 
-                # Apply the manual SGD update: weight = weight - (STEP_SIZE * gradient)
-                def apply_update(p, g):
-                    return p - (STEP_SIZE * g)
+                targets = jnp.array([
+                    b.reward if b.next_state_is_terminal else 
+                    b.reward + ( DISCOUNT_FACTOR * jnp.max(q) )
+                for b, q in zip(m_batch, eval_qs)])
+                
+                
+                grad_fn = nnx.value_and_grad(rmse_loss, has_aux=True)
+                (loss_val, all_qs), grads = grad_fn(agent.active_network, states, actions, targets)
 
-                # Get the current state, update it, and put it back in the model
-                graphdef, state = nnx.split(agent.active_network)
-                new_state = jax.tree.map(apply_update, state, accumulated_grads)
+                # Apply the update using your existing logic
+                _, state = nnx.split(agent.active_network)
+                new_state = jax.tree.map(lambda p, g: p - (STEP_SIZE * g), state, grads)
                 nnx.update(agent.active_network, new_state)
+                    
 
                 if total_steps % NEURAL_NETWORK_UPDATE_STEP == 0:
-                    # update the second network
-                    pass
+                    # Extract the state from the active network and load it into the eval network
+                    _, active_state = nnx.split(agent.active_network)
+                    nnx.update(agent.eval_network, active_state)
+                    print(f"Step {total_steps}: Updated eval_network!")
+
                     
             
             state = next_state
@@ -110,17 +110,16 @@ def run_landing(episodes=5, render=True):
         print(f"Episode {episode + 1} finished with Reward: {total_reward:.2f}")
         print("Current buffer size", len(buffer))
 
-    print("Done", "buffer sampling: ", buffer.sample(1))
+
     env.close()
 
-def rmse_loss(model, state, action, y):
-    qs = model(state)
-    chosen_q = qs[action]
-    return jnp.sqrt(jnp.mean((chosen_q - y) ** 2)), qs
-
-def calc_action_values(state) -> List[Any]:
-    """placeholder"""
-    return [] # todo
+def mse_loss(model, states, actions, targets):
+    qs = model(states)
+    # Pick the Q-value for the action taken in each state
+    # This selects qs[0, actions[0]], qs[1, actions[1]], etc.
+    chosen_qs = qs[jnp.arange(len(actions)), actions]
+    loss = jnp.mean((chosen_qs - targets) ** 2)
+    return loss, qs
 
 if __name__ == "__main__":
     run_landing()
