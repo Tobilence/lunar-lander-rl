@@ -6,5 +6,5 @@ class DummyAgent:
         self.action_size = action_size
         self.actions = [a for a in range(self.action_size)]
 
-    def act(self, state):
+    def act(self, state, epsilon:float=.0):
         return np.random.choice(self.actions)

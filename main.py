@@ -20,6 +20,7 @@ def run_landing(episodes=5, render=True):
         truncated = False
         total_reward = 0
 
+        print("="*50)
         while not (terminated or truncated):
             action = agent.act(state)
             
