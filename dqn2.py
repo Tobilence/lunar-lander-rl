@@ -75,6 +75,8 @@ def run_landing(episodes=5, render=True):
     optimizer = nnx.Optimizer(acting_network, optax.adam(OPTIMIZER_LR), wrt=nnx.Param)
     jax_key = jax.random.key(0)
     checkpointer = ocp.StandardCheckpointer()
+    from pathlib import Path
+    base_path = Path("checkpoints_v0").resolve()
 
     epsilon = 0.5  # this should initially be high and then decay --> todo
     total_steps = 0
@@ -141,8 +143,9 @@ def run_landing(episodes=5, render=True):
                 print(f"Step {total_steps}: Updated eval_network!")
 
             if total_steps % 10_000 == 0:
-                state = nnx.state(acting_network)
-                checkpointer.save(f'checkpoints_v0/step_{total_steps}', state)
+                network_state = nnx.state(acting_network)
+                checkpointer_path = base_path / f"step_{total_steps}"
+                checkpointer.save(checkpointer_path, network_state)
 
 
             state = next_state
