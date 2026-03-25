@@ -7,6 +7,7 @@ from pathlib import Path
 from gymnasium.wrappers import RecordVideo
 from pathlib import Path
 from agent import QNetwork
+import typer
 
 def load_model(checkpoint_dir, step):
     model = QNetwork(nnx.Rngs(0))
@@ -54,15 +55,15 @@ def run_visual(model, episodes, mode, video_folder):
         print(f"Episode {ep + 1} completed - Total Reward: {total_reward:.2f}")
 
     env.close()
-    print(f"Process finished in '{mode}' mode.")
 
 
-if __name__ == "__main__":
-    # should be cli params later
-    run_name: str = "dqn_20260325_094921"
-    step: int = 50000
-    mode: Literal["show", "record"] = "show"
-    
+def main(
+        run_name: str,
+        step: int,
+        episodes:int=3,
+        mode: Literal["show", "record"]="show"
+    ):
+
     run_path = Path("runs") / run_name 
     checkpoint_path = run_path / "checkpoints"
     video_path = run_path / "videos" / f"step-{step}"
@@ -70,7 +71,17 @@ if __name__ == "__main__":
     
     run_visual(
         trained_model,
-        episodes=3,
-        mode="record",
+        episodes=episodes,
+        mode=mode,
         video_folder=video_path
     )
+
+
+if __name__ == "__main__":
+    # should be cli params later
+    run_name: str = "dqn_20260325_103435"
+    step: int = 100000
+    mode: Literal["show", "record"] = "show"
+
+    typer.run(main)
+    
