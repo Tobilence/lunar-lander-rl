@@ -8,6 +8,15 @@ from helpers import RingBuffer
 from dataclasses import dataclass
 from typing import Any, SupportsFloat, List
 import orbax.checkpoint as ocp
+from flax.metrics import tensorboard
+import time
+
+## tensorboard setup
+run_name = f"flax_dqn_{int(time.time())}"
+log_dir = f"runs/{run_name}"
+writer = tensorboard.SummaryWriter(log_dir)
+print(f"Logging Flax metrics to {log_dir}")
+
 
 ## Lunar Lander Constants
 LUNAR_LANDER_OBSERVATION_SPACE_DIM = 8
