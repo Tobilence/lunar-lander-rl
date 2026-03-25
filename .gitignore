@@ -16,7 +16,7 @@ lib/
 *.swp
 
 # Project specific
-checkpoints_v0/
+runs/
 
 # Operating System Files
 .DS_Store
