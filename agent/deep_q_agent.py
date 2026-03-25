@@ -1,33 +1,6 @@
 import jax.numpy as jnp
 from flax import nnx
-from random import random, randint
-from typing import Literal
-
-
-class DeepQAgent:
-    def __init__(self, state_size, action_size):
-        self.active_network = QNetwork(rngs=nnx.Rngs(0)) # the network that will be used to update the loss function
-        self.eval_network = QNetwork(rngs=nnx.Rngs(0))
-
-    def act(self, state, epsilon=0.05):
-        if random() < epsilon:
-            return randint(0, 3)
-
-        y = self.active_network(state)
-        argmax = jnp.argmax(y)
-        print(y, int(argmax))
-        return int(argmax)
-    
-
-    def get_action_values(
-        self,
-        state,
-        model: Literal["active", "eval"]="active"
-    ):
-        m = self.active_network if model == "active" else self.eval_network
-        return m(state)
-
-
+import jax
 
 class QNetwork(nnx.Module):
     def __init__(self, rngs: nnx.Rngs, d_in=8, d_hidden_1=128, d_hidden_2=128, d_out=4):
@@ -43,5 +16,37 @@ class QNetwork(nnx.Module):
         x = nnx.relu(self.hidden_2(x))
         return self.lin_out(x)
 
-def rmse_loss(self, pred, y):
-    return jnp.sqrt(jnp.mean((pred - y) ** 2))
+# epsilon greedy policy
+def act_epsilon_greedy(key, q_values, epsilon=0.05):
+    prob_key, action_key = jax.random.split(key)
+    random_val = jax.random.uniform(prob_key)
+    random_action = jax.random.randint(action_key, shape=(), minval=0, maxval=4)
+    greedy_action = jnp.argmax(q_values)
+    return jnp.where(random_val < epsilon, random_action, greedy_action)
+
+fun_batch_act = nnx.vmap(act_epsilon_greedy, in_axes=(0, 0, None)) # key and state need to have 0
+
+
+# calcualte targets
+def calcualte_targets(eval_model, next_state, reward, is_terminal_state, gamma=0.9):
+    return jnp.where(is_terminal_state,
+                     reward,
+                     reward + gamma * jnp.max(eval_model(next_state))
+                    )
+fun_batch_calculate_target = nnx.vmap(calcualte_targets, in_axes=(None, 0,0,0, None))
+
+# training
+def mse_loss(model, states, actions, targets):
+    qs = model(states)
+    # Pick the Q-value for the action taken in each state
+    # This selects qs[0, actions[0]], qs[1, actions[1]], etc.
+    chosen_qs = qs[jnp.arange(len(actions)), actions]
+    loss = jnp.mean((chosen_qs - targets) ** 2)
+    return loss, qs
+
+@nnx.jit
+def train_step(model, optimizer, states, chosen_actions, targets):
+    fun_inference_grad = nnx.value_and_grad(mse_loss, has_aux=True)
+    (loss, qs), grad = fun_inference_grad(model, states, chosen_actions, targets)
+    optimizer.update(model, grad)
+    return loss, qs
