@@ -78,10 +78,5 @@ def main(
 
 
 if __name__ == "__main__":
-    # should be cli params later
-    run_name: str = "dqn_20260325_103435"
-    step: int = 100000
-    mode: Literal["show", "record"] = "show"
-
     typer.run(main)
     
