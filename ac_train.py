@@ -1,67 +1,31 @@
-from typing import Any
 import gymnasium as gym
+import yaml
 import optax
 import jax.numpy as jnp
 import flax.nnx as nnx
 import jax
 from tqdm import tqdm
+import orbax.checkpoint as ocp
+from tensorboardX import SummaryWriter
+from pathlib import Path
+from tqdm import tqdm
+import yaml
+import time
+from agent import ActorCriticNetwork, batched_loss_function
 
 
 hyperparameters = {
-    "learning_rate": 4e-5,
     "optimizer_lr": 4e-5,
-    "gamma": 0.99
+    "gamma": 0.99,
+    "entropy_coef": 0.01,
+    "epochs_per_episode": 10
 }
 
-class ActorCriticNetwork(nnx.Module):
-    def __init__(self, rngs: nnx.Rngs, d_in=8, d_hidden_1=128, d_hidden_2=128, head_dim=128, d_actions=4):
-        self.lin_in = nnx.Linear(d_in, d_hidden_1, rngs=rngs)
-        self.hidden_1 = nnx.Linear(d_hidden_1, d_hidden_2, rngs=rngs)
-        self.hidden_2 = nnx.Linear(d_hidden_2, d_hidden_2, rngs=rngs)
-
-        self.hidden_critic = nnx.Linear(d_hidden_2, head_dim, rngs=rngs)
-        self.hidden_actor = nnx.Linear(d_hidden_2, head_dim, rngs=rngs)
-        self.head_critic = nnx.Linear(head_dim, 1, rngs=rngs)
-        self.head_actor = nnx.Linear(head_dim, d_actions, rngs=rngs)
-        
-    
-    def __call__(self, x):
-        x = nnx.relu(self.lin_in(x))
-        x = nnx.relu(self.hidden_1(x))
-        x = nnx.relu(self.hidden_2(x))
-
-        critic = nnx.relu(self.hidden_critic(x))
-        critic = self.head_critic(critic)
-
-        actor = nnx.relu(self.hidden_actor(x))
-        actor = self.head_actor(actor)
-
-        return actor, critic
-
-
-def loss_fn(model: ActorCriticNetwork, state, action, reward, next_state, terminal):
-    actor_logits, critic = model(state)
-    _, critic_next = model(next_state)
-    
-    target = reward + hyperparameters["gamma"] * jax.lax.stop_gradient(critic_next) * (1 - terminal)
-    td_error = target - critic
-
-    # Actor Loss: -log_prob[action] * advantage
-    log_probs = jax.nn.log_softmax(actor_logits)
-    log_prob_action = log_probs[action]
-    actor_loss = -log_prob_action * jax.lax.stop_gradient(td_error)
-
-    critic_loss = jnp.square(td_error)
-
-    return (actor_loss + 0.5 * critic_loss).mean()
 
 @nnx.jit
-def train_step(model: ActorCriticNetwork, optimizer: nnx.Optimizer, state, action, reward, next_state, terminal):
-    # We differentiate with respect to the model's parameters
-    grad_fn = nnx.value_and_grad(loss_fn)
-    loss, grads = grad_fn(model, state, action, reward, next_state, terminal)
-    
-    # Update the optimizer and model parameters
+def train_step(model: ActorCriticNetwork, optimizer: nnx.Optimizer, state, action, reward, next_state, terminal, hyperparameters):
+    grad_fn = nnx.value_and_grad(batched_loss_function)
+    loss, grads = grad_fn(model, state, action, reward, next_state, terminal, hyperparameters["gamma"], hyperparameters["entropy_coef"])
     optimizer.update(model, grads)
     return loss
 
@@ -69,11 +33,13 @@ def train_step(model: ActorCriticNetwork, optimizer: nnx.Optimizer, state, actio
 ## Lunar Lander Constants
 LUNAR_LANDER_OBSERVATION_SPACE_DIM = 8
 LUNAR_LANDER_ACTION_SPACE_SIZE = 4
-TOTAL_TRAINING_STEPS = 50_000
+TOTAL_TRAINING_STEPS = 500_000
 
 
 ## Main Loop
 def train(
+        checkpoint_manager,
+        tensorboard_writer,
         render=True
     ):
     mode = "human" if render else None
@@ -97,26 +63,91 @@ def train(
         total_reward = 0
         episode += 1
 
+        states, actions, rewards, next_states, terminals = [], [], [], [], []
+
         while not (terminated or truncated):
             # setup variables
             jax_key, subkey = jax.random.split(jax_key)
             current_step +=1
             pbar.update(1)
 
-            actor_logits, critic = network(state)
+            actor_logits, _ = network(state)
             action = int(jax.random.categorical(subkey, actor_logits))
+            tensorboard_writer.add_scalar("sanity-check/chosen-action", action, current_step)
             
             next_state, reward, terminated, truncated, _ = env.step(action)
 
-            _, critic_next_state = jax.lax.stop_gradient(network(next_state))
+            # Store the transition
+            states.append(state)
+            actions.append(action)
+            rewards.append(reward)
+            next_states.append(next_state)
+            terminals.append(1.0 if terminated else 0.0)
 
-            loss = train_step(network, optimizer, state, action, reward, next_state, terminated or truncated)
+            # loss = train_step(network, optimizer, state, action, reward, next_state, terminated or truncated)
+            # tensorboard_writer.add_scalar("train/loss", loss, current_step)
 
             state = next_state
             total_reward += float(reward)
+
+            if current_step % 10_000 == 0:
+                network_state = nnx.state(network)
+                checkpoint_manager.save(current_step, network_state)
+            
+        
+        if len(states) > 0:
+            # Convert lists to JAX arrays
+            states_arr = jnp.array(states)
+            actions_arr = jnp.array(actions)
+            rewards_arr = jnp.array(rewards, dtype=jnp.float32)
+            next_states_arr = jnp.array(next_states)
+            terminals_arr = jnp.array(terminals, dtype=jnp.float32)
+
+            # batched training step
+            loss = train_step(network, optimizer, states_arr, actions_arr, rewards_arr, next_states_arr, terminals_arr, hyperparameters)
+            
+            tensorboard_writer.add_scalar("train/loss", float(loss), current_step)
+
+        tensorboard_writer.add_scalar("Metrics/Episode_Reward", total_reward, episode)
+
         
     pbar.close()
     env.close()
 
+
+def setup_run_dir(run_name: str):
+    run_name = time.strftime(f"{run_name}_%Y%m%d_%H%M%S")
+    run_path = Path("runs") / run_name
+    run_path.mkdir(parents=True, exist_ok=True)
+    return run_path
+
+def setup_run_loggers(run_path):
+    log_path = run_path / "logs"
+    ckpt_path = run_path / "checkpoints"
+    
+    log_path.mkdir(parents=True, exist_ok=True)
+    ckpt_path.mkdir(parents=True, exist_ok=True)
+    
+    tensorboard_writer = SummaryWriter(str(log_path))
+    
+    checkpoint_manager = ocp.CheckpointManager(
+        ckpt_path.resolve(), 
+        ocp.StandardCheckpointer(), 
+    )
+    return tensorboard_writer, checkpoint_manager
+
+def log_hyperparameters(run_dir, hyperparameters):
+    with open(run_dir / "hyperparameters.yaml", "w+") as f:
+        yaml.dump(hyperparameters, f, default_flow_style=False, sort_keys=False)
+
 if __name__ == "__main__":
-    train(render=True)
+    run_dir = setup_run_dir("ac")
+    log_hyperparameters(run_dir, hyperparameters)
+    writer, checkpoint_manager = setup_run_loggers(run_dir)
+
+    train(
+        checkpoint_manager,
+        writer,
+        render=False
+    )
+    writer.close()
