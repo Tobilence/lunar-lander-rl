@@ -1,12 +1,9 @@
 import gymnasium as gym
 import optax
 import jax
-import jax.numpy as jnp
 from flax import nnx
-from agent import QNetwork, fun_batch_calculate_target, fun_batch_act, act_epsilon_greedy, train_step
+from agent import QNetwork, fun_batch_calculate_target, act_epsilon_greedy, train_step
 from helpers import RingBuffer, calculate_epsilon_decay
-from dataclasses import dataclass
-from typing import Any, SupportsFloat, List
 import orbax.checkpoint as ocp
 from tensorboardX import SummaryWriter
 import time
