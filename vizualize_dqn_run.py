@@ -1,7 +1,7 @@
 import gymnasium as gym
 import orbax.checkpoint as ocp
 import jax.numpy as jnp
-from typing import Literal
+from typing import Literal, Union
 from flax import nnx
 from pathlib import Path
 from gymnasium.wrappers import RecordVideo
@@ -57,17 +57,26 @@ def run_visual(model, episodes, mode, video_folder):
     env.close()
 
 
+def find_latest_step(checkpoint_path):
+    import os
+    step_dirs = os.listdir(checkpoint_path)
+    latest_step = max(map(int, step_dirs))
+    return latest_step
+    
+
 def main(
         run_name: str,
-        step: int,
+        step: Union[int, None]=None,
         episodes:int=3,
         mode: Literal["show", "record"]="show"
     ):
 
     run_path = Path("runs") / run_name 
     checkpoint_path = run_path / "checkpoints"
+    step = step or find_latest_step(checkpoint_path)
     video_path = run_path / "videos" / f"step-{step}"
     trained_model = load_model(checkpoint_path, step)
+    
     
     run_visual(
         trained_model,

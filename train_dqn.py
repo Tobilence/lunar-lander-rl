@@ -17,17 +17,17 @@ import yaml
 ## Lunar Lander Constants
 LUNAR_LANDER_OBSERVATION_SPACE_DIM = 8
 LUNAR_LANDER_ACTION_SPACE_SIZE = 4
-TOTAL_TRAINING_STEPS = 100_000
+TOTAL_TRAINING_STEPS = 50_000
 
 hyperparameters = {
     "buffer_size": 5000,
     "epsilon_start": 0.9,
     "epsilon_end": 0.05,
-    "epsilon_decay_steps": 80_000,
-    "learning_start_step": 100,
-    "gamma": 0.99,
-    "mini_batch_size": 64,
-    "neural_network_update_step": 5000,
+    "epsilon_decay_steps": 40_000,
+    "learning_start_step": 1000,
+    "gamma": 0.999,
+    "mini_batch_size": 128,
+    "neural_network_update_step": 2000,
     "optimizer_lr": 5e-4,
 }
 
@@ -73,7 +73,6 @@ def train(
                 hyperparameters["epsilon_decay_steps"]
             )
             tensorboard_writer.add_scalar("sanity-check/epsilon", float(epsilon), current_step)
-
             
             q_values = acting_network(state)
             jax_key, subkey = jax.random.split(jax_key)
@@ -84,6 +83,15 @@ def train(
             next_state, reward, terminated, truncated, _ = env.step(action)
             tensorboard_writer.add_scalar("train/step_reward", reward, current_step)
 
+
+            # temporal difference error:
+            # R_t+1 + gamma * greedy_next_state_action - current StateAction prediction
+            temporal_difference_error = (
+                reward +
+                hyperparameters["gamma"] * max(acting_network(next_state)) -
+                q_values[action]
+            )
+
             buffer.add(
                 [
                     state,
@@ -91,8 +99,12 @@ def train(
                     reward,
                     next_state,
                     (truncated or terminated)
-                ]
+                ],
+                tde=abs(temporal_difference_error)
             )
+
+            tensorboard_writer.add_scalar("train/tde", temporal_difference_error, current_step)
+            tensorboard_writer.add_scalar("train/abs_tde", abs(temporal_difference_error), current_step)
             tensorboard_writer.add_scalar("buffer/size", len(buffer), current_step)
 
             if len(buffer) >= hyperparameters["learning_start_step"]:
@@ -112,13 +124,13 @@ def train(
                 _, active_state = nnx.split(acting_network)
                 nnx.update(eval_network, active_state)
 
-            if current_step % 10_000 == 0:
+            if current_step % 25_000 == 0:
                 network_state = nnx.state(acting_network)
                 checkpoint_manager.save(current_step, network_state)
 
 
             state = next_state
-            total_reward += reward # pyright: ignore[reportOperatorIssue]
+            total_reward += float(reward)
         
         tensorboard_writer.add_scalar("Metrics/Episode_Reward", float(total_reward), episode)
 
@@ -175,7 +187,6 @@ def setup_run_loggers(run_path):
 
 
 def log_hyperparameters(run_dir, hyperparameters):
-    # Writing to a file
     with open(run_dir / "hyperparameters.yaml", "w+") as f:
         yaml.dump(hyperparameters, f, default_flow_style=False, sort_keys=False)
 

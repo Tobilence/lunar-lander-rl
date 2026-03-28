@@ -16,6 +16,24 @@ class QNetwork(nnx.Module):
         x = nnx.relu(self.hidden_2(x))
         return self.lin_out(x)
 
+class DuelingQNetwork(nnx.Module):
+    def __init__(self) -> None:
+        pass
+    
+    def __call__(self, x):
+        # todo: adapt architecture according to slides
+        pass
+
+
+class NoisyLayer(nnx.Module):
+    def __init__(self) -> None:
+        pass
+    
+    def __call__(self, x):
+        # todo: implement a noisy linear layer according to formula in slides
+        pass
+
+
 # epsilon greedy policy
 def act_epsilon_greedy(key, q_values, epsilon=0.05):
     prob_key, action_key = jax.random.split(key)
@@ -31,7 +49,7 @@ fun_batch_act = nnx.vmap(act_epsilon_greedy, in_axes=(0, 0, None)) # key and sta
 def calcualte_targets(eval_model, next_state, reward, is_terminal_state, gamma=0.9):
     return jnp.where(is_terminal_state,
                      reward,
-                     reward + gamma * jnp.max(eval_model(next_state))
+                     reward + gamma * jnp.max(eval_model(next_state))  # TODO: could add the double DQN here; would need to pass acting network as well
                     )
 fun_batch_calculate_target = nnx.vmap(calcualte_targets, in_axes=(None, 0,0,0, None))
 
