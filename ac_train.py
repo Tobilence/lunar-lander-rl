@@ -9,6 +9,7 @@ import orbax.checkpoint as ocp
 from tensorboardX import SummaryWriter
 from pathlib import Path
 import time
+from helpers import save_model_class_name
 from agent.actor_critic import ActorCriticNetwork, batched_loss_function, batch_debug_metrics
 
 
@@ -19,7 +20,6 @@ hyperparameters = {
     "epochs_per_episode": 10,
     "rollout_length": 8,
 }
-
 
 @nnx.jit
 def train_step(model: ActorCriticNetwork, optimizer: nnx.Optimizer, state, action, reward, next_state, terminal, hyperparameters):
@@ -61,6 +61,7 @@ TOTAL_TRAINING_STEPS = 500_000
 
 ## Main Loop
 def train(
+        network,
         checkpoint_manager,
         tensorboard_writer,
         render=True
@@ -70,7 +71,6 @@ def train(
 
     # optimizer = nnx.Optimizer(acting_network, optax.adam(hyperparameters["optimizer_lr"]), wrt=nnx.Param)
     jax_key = jax.random.key(0)
-    network = ActorCriticNetwork(rngs=nnx.Rngs(0))
     optimizer = optax.chain(
         # 1. Clip the gradients so they don't exceed a total norm of 0.5
         optax.clip_by_global_norm(0.5),
@@ -217,7 +217,11 @@ if __name__ == "__main__":
     log_hyperparameters(run_dir, hyperparameters)
     writer, checkpoint_manager = setup_run_loggers(run_dir)
 
+    network = ActorCriticNetwork(rngs=nnx.Rngs(0))
+    save_model_class_name(run_dir, network)
+
     train(
+        network,
         checkpoint_manager,
         writer,
         render=False

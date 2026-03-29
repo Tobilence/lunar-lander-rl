@@ -70,3 +70,9 @@ def calculate_epsilon_decay(
         epsilon_start - (epsilon_start - epsilon_end) * (current_step / epsilon_decay_steps)
     )
 
+def save_model_class_name(run_dir, model):
+    model_file = run_dir / "model.txt"
+    with open(model_file, "w") as f:
+        f.write(model.__class__.__name__)
+
+
