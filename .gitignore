@@ -24,3 +24,5 @@ Thumbs.db
 
 # Secrets (Crucial!)
 .env
+
+__pycache__
