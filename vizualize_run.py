@@ -7,11 +7,24 @@ from flax import nnx
 from pathlib import Path
 from gymnasium.wrappers import RecordVideo
 from pathlib import Path
-from agent import ActorCriticNetwork
+from agent import QNetwork, NoisyDuelingQNetwork, ActorCriticNetwork
+from typing import Any, Tuple
 import typer
 
-def load_model(checkpoint_dir, step):
-    model = ActorCriticNetwork(nnx.Rngs(0))
+def read_model_info(run_dir):
+    with open(run_dir / "model.txt", "r+") as file:
+        model = file.readline()
+        if model == "QNetwork":
+            return QNetwork, "function_approximation"
+        if model == "NoisyDuelingQNetwork":
+            return NoisyDuelingQNetwork, "function_approximation"
+        if model == "A2C":
+            return ActorCriticNetwork, "policy_gradient"
+        else: 
+            raise Exception("unknown model name.")
+
+def load_model(model_class, checkpoint_dir, step):
+    model = model_class(nnx.Rngs(0))
     _, state = nnx.split(model)
     checkpoint_manager = ocp.CheckpointManager(
         Path(checkpoint_dir).resolve(), 
@@ -21,14 +34,8 @@ def load_model(checkpoint_dir, step):
     nnx.update(model, restored_state)
     return model
 
-def run_visual(model, episodes, mode, video_folder):
-    """
-    Runs the model in the environment.
-    Args:
-        mode: "show" for live window, "record" to save to MP4.
-    """
+def run_visual(model, model_type, episodes, mode, video_folder):
     render_mode = "human" if mode == "show" else "rgb_array"
-    
     env = gym.make("LunarLander-v3", render_mode=render_mode)
 
     if mode == "record":
@@ -39,8 +46,8 @@ def run_visual(model, episodes, mode, video_folder):
             episode_trigger=lambda x: True, # Record every episode
             disable_logger=True # Keeps the console clean
         )
-
     jax_key = jax.random.key(0)
+
     for ep in range(episodes):
         state, info = env.reset()
         terminated = False
@@ -49,8 +56,14 @@ def run_visual(model, episodes, mode, video_folder):
         
         while not (terminated or truncated):
             jax_key, subkey = jax.random.split(jax_key)
-            actor_logits, _ = model(state)
-            action = int(jax.random.categorical(subkey, actor_logits))
+            if model_type == "function_approximation":
+                q_values = model(state)
+                action = int(jnp.argmax(q_values))
+            elif model_type == "policy_gradient":
+                actor_logits, _ = model(state)
+                action = int(jax.random.categorical(subkey, actor_logits))
+            else:
+                raise Exception("unknown model type")
             
             state, reward, terminated, truncated, _ = env.step(action)
             total_reward += float(reward)
@@ -75,14 +88,17 @@ def main(
     ):
 
     run_path = Path("runs") / run_name 
+    model_cls, model_type = read_model_info(run_path)
+
     checkpoint_path = run_path / "checkpoints"
     step = step or find_latest_step(checkpoint_path)
     video_path = run_path / "videos" / f"step-{step}"
-    trained_model = load_model(checkpoint_path, step)
+    trained_model = load_model(model_cls, checkpoint_path, step)
     
     
     run_visual(
         trained_model,
+        model_type,
         episodes=episodes,
         mode=mode,
         video_folder=video_path

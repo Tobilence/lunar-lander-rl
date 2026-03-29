@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import optax
 import jax
 from flax import nnx
-from agent import QNetwork, fun_batch_calculate_target_ddqn, act_epsilon_greedy, train_step
+from agent import NoisyDuelingQNetwork, fun_batch_calculate_target_ddqn, act_epsilon_greedy, train_step
 from helpers import RingBuffer, calculate_epsilon_decay
 import orbax.checkpoint as ocp
 from tensorboardX import SummaryWriter
@@ -15,17 +15,17 @@ import yaml
 ## Lunar Lander Constants
 LUNAR_LANDER_OBSERVATION_SPACE_DIM = 8
 LUNAR_LANDER_ACTION_SPACE_SIZE = 4
-TOTAL_TRAINING_STEPS = 50_000
+TOTAL_TRAINING_STEPS = 300_000
 
 hyperparameters = {
-    "buffer_size": 5000,
+    "buffer_size": 10_000,
     "epsilon_start": 0.9,
     "epsilon_end": 0.05,
     "epsilon_decay_steps": 40_000,
     "learning_start_step": 1000,
     "gamma": 0.999,
     "mini_batch_size": 128,
-    "neural_network_update_step": 500,
+    "neural_network_update_step": 1000,
     "optimizer_lr": 5e-4,
 }
 
@@ -41,8 +41,8 @@ def train(
 
     buffer = RingBuffer(hyperparameters["buffer_size"])
 
-    eval_network = QNetwork(nnx.Rngs(0))
-    acting_network = QNetwork(nnx.Rngs(0))
+    eval_network = NoisyDuelingQNetwork(nnx.Rngs(0))
+    acting_network = NoisyDuelingQNetwork(nnx.Rngs(0))
     optimizer = nnx.Optimizer(acting_network, optax.adam(hyperparameters["optimizer_lr"]), wrt=nnx.Param)
     jax_key = jax.random.key(0)
 
@@ -58,22 +58,17 @@ def train(
         truncated = False
         total_reward = 0
         episode += 1
+        episode_step = 0
 
         while not (terminated or truncated):
             # setup variables
             current_step +=1
+            episode_step +=1
             pbar.update(1)
-            epsilon = calculate_epsilon_decay(
-                current_step,
-                hyperparameters["epsilon_start"],
-                hyperparameters["epsilon_end"],
-                hyperparameters["epsilon_decay_steps"]
-            )
-            tensorboard_writer.add_scalar("sanity-check/epsilon", float(epsilon), current_step)
             
             q_values = acting_network(state)
             jax_key, subkey = jax.random.split(jax_key)
-            action = act_epsilon_greedy(subkey, q_values, epsilon=epsilon)
+            action = act_epsilon_greedy(subkey, q_values, epsilon=0)
             action = int(action)
             tensorboard_writer.add_scalar("sanity-check/chosen-action", action, current_step)
             
@@ -118,6 +113,7 @@ def train(
             total_reward += float(reward)
         
         tensorboard_writer.add_scalar("Metrics/Episode_Reward", float(total_reward), episode)
+        tensorboard_writer.add_scalar("Metrics/Episode_N_Steps", episode_step, episode)
 
     pbar.close()
     env.close()

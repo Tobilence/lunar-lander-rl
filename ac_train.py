@@ -8,17 +8,16 @@ from tqdm import tqdm
 import orbax.checkpoint as ocp
 from tensorboardX import SummaryWriter
 from pathlib import Path
-from tqdm import tqdm
-import yaml
 import time
-from agent import ActorCriticNetwork, batched_loss_function
+from agent.actor_critic import ActorCriticNetwork, batched_loss_function, batch_debug_metrics
 
 
 hyperparameters = {
     "optimizer_lr": 4e-5,
     "gamma": 0.99,
-    "entropy_coef": 0.01,
-    "epochs_per_episode": 10
+    "entropy_coef": 0.1,
+    "epochs_per_episode": 10,
+    "rollout_length": 8,
 }
 
 
@@ -28,6 +27,30 @@ def train_step(model: ActorCriticNetwork, optimizer: nnx.Optimizer, state, actio
     loss, grads = grad_fn(model, state, action, reward, next_state, terminal, hyperparameters["gamma"], hyperparameters["entropy_coef"])
     optimizer.update(model, grads)
     return loss
+
+
+def log_rollout_diagnostics(tensorboard_writer, network, states_arr, actions_arr, rewards_arr, next_states_arr, terminals_arr, current_step):
+    metrics = batch_debug_metrics(
+        network,
+        states_arr,
+        actions_arr,
+        rewards_arr,
+        next_states_arr,
+        terminals_arr,
+        hyperparameters["gamma"],
+        hyperparameters["entropy_coef"],
+    )
+
+    for metric_name, metric_value in metrics.items():
+        tensorboard_writer.add_scalar(f"sanity-check/rollout_{metric_name}", float(metric_value), current_step)
+
+    tensorboard_writer.add_scalar("sanity-check/rollout_size", float(states_arr.shape[0]), current_step)
+    tensorboard_writer.add_scalar("sanity-check/state_mean", float(states_arr.mean()), current_step)
+    tensorboard_writer.add_scalar("sanity-check/state_std", float(states_arr.std()), current_step)
+    tensorboard_writer.add_scalar("sanity-check/state_min", float(states_arr.min()), current_step)
+    tensorboard_writer.add_scalar("sanity-check/state_max", float(states_arr.max()), current_step)
+    tensorboard_writer.add_scalar("sanity-check/next_state_mean", float(next_states_arr.mean()), current_step)
+    tensorboard_writer.add_scalar("sanity-check/next_state_std", float(next_states_arr.std()), current_step)
 
 
 ## Lunar Lander Constants
@@ -48,7 +71,13 @@ def train(
     # optimizer = nnx.Optimizer(acting_network, optax.adam(hyperparameters["optimizer_lr"]), wrt=nnx.Param)
     jax_key = jax.random.key(0)
     network = ActorCriticNetwork(rngs=nnx.Rngs(0))
-    optimizer = nnx.Optimizer(network, optax.adam(hyperparameters["optimizer_lr"]), wrt=nnx.Param)
+    optimizer = optax.chain(
+        # 1. Clip the gradients so they don't exceed a total norm of 0.5
+        optax.clip_by_global_norm(0.5),
+        # 2. Apply the Adam optimizer logic
+        optax.adam(learning_rate=3e-4)
+    )
+    optimizer = nnx.Optimizer(network, optimizer, wrt=nnx.Param)
 
     current_step = 0
     episode = 0
@@ -61,6 +90,8 @@ def train(
         terminated = False
         truncated = False
         total_reward = 0
+        episode_length = 0
+        rollout_updates = 0
         episode += 1
 
         states, actions, rewards, next_states, terminals = [], [], [], [], []
@@ -71,18 +102,43 @@ def train(
             current_step +=1
             pbar.update(1)
 
-            actor_logits, _ = network(state)
+            actor_logits, critic_value = network(state)
+            action_probs = jax.nn.softmax(actor_logits)
+            action_log_probs = jax.nn.log_softmax(actor_logits)
+            policy_entropy = -jnp.sum(action_probs * action_log_probs)
             action = int(jax.random.categorical(subkey, actor_logits))
             tensorboard_writer.add_scalar("sanity-check/chosen-action", action, current_step)
+            tensorboard_writer.add_scalar("sanity-check/value", float(jnp.squeeze(critic_value)), current_step)
+            tensorboard_writer.add_scalar("sanity-check/policy_entropy", float(policy_entropy), current_step)
+            tensorboard_writer.add_scalar("sanity-check/logits_mean", float(actor_logits.mean()), current_step)
+            tensorboard_writer.add_scalar("sanity-check/logits_std", float(actor_logits.std()), current_step)
+            tensorboard_writer.add_scalar("sanity-check/logits_min", float(actor_logits.min()), current_step)
+            tensorboard_writer.add_scalar("sanity-check/logits_max", float(actor_logits.max()), current_step)
+            tensorboard_writer.add_scalar("sanity-check/action_prob_0", float(action_probs[0]), current_step)
+            tensorboard_writer.add_scalar("sanity-check/action_prob_1", float(action_probs[1]), current_step)
+            tensorboard_writer.add_scalar("sanity-check/action_prob_2", float(action_probs[2]), current_step)
+            tensorboard_writer.add_scalar("sanity-check/action_prob_3", float(action_probs[3]), current_step)
+            tensorboard_writer.add_scalar("sanity-check/state_norm", float(jnp.linalg.norm(jnp.asarray(state))), current_step)
+            tensorboard_writer.add_scalar("sanity-check/state_mean_step", float(jnp.asarray(state).mean()), current_step)
+            tensorboard_writer.add_scalar("sanity-check/state_abs_max_step", float(jnp.abs(jnp.asarray(state)).max()), current_step)
             
             next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
 
             # Store the transition
             states.append(state)
             actions.append(action)
             rewards.append(reward)
             next_states.append(next_state)
-            terminals.append(1.0 if terminated else 0.0)
+            terminals.append(1.0 if done else 0.0)
+            episode_length += 1
+
+            tensorboard_writer.add_scalar("sanity-check/step_reward", float(reward), current_step)
+            tensorboard_writer.add_scalar("sanity-check/episode_return_running", float(total_reward + reward), current_step)
+            tensorboard_writer.add_scalar("sanity-check/done", float(done), current_step)
+            tensorboard_writer.add_scalar("sanity-check/terminated", float(terminated), current_step)
+            tensorboard_writer.add_scalar("sanity-check/truncated", float(truncated), current_step)
+            tensorboard_writer.add_scalar("sanity-check/current_rollout_fill", float(len(states)), current_step)
 
             # loss = train_step(network, optimizer, state, action, reward, next_state, terminated or truncated)
             # tensorboard_writer.add_scalar("train/loss", loss, current_step)
@@ -90,25 +146,41 @@ def train(
             state = next_state
             total_reward += float(reward)
 
+            if len(states) >= hyperparameters["rollout_length"] or done:
+                # Convert lists to JAX arrays
+                states_arr = jnp.array(states)
+                actions_arr = jnp.array(actions)
+                rewards_arr = jnp.array(rewards, dtype=jnp.float32)
+                next_states_arr = jnp.array(next_states)
+                terminals_arr = jnp.array(terminals, dtype=jnp.float32)
+
+                log_rollout_diagnostics(
+                    tensorboard_writer,
+                    network,
+                    states_arr,
+                    actions_arr,
+                    rewards_arr,
+                    next_states_arr,
+                    terminals_arr,
+                    current_step,
+                )
+
+                # batched training step
+                loss = train_step(network, optimizer, states_arr, actions_arr, rewards_arr, next_states_arr, terminals_arr, hyperparameters)
+                tensorboard_writer.add_scalar("train/loss", float(loss), current_step)
+                rollout_updates += 1
+                tensorboard_writer.add_scalar("sanity-check/rollout_updates", float(rollout_updates), current_step)
+
+                states, actions, rewards, next_states, terminals = [], [], [], [], []
+
+
             if current_step % 10_000 == 0:
                 network_state = nnx.state(network)
                 checkpoint_manager.save(current_step, network_state)
-            
-        
-        if len(states) > 0:
-            # Convert lists to JAX arrays
-            states_arr = jnp.array(states)
-            actions_arr = jnp.array(actions)
-            rewards_arr = jnp.array(rewards, dtype=jnp.float32)
-            next_states_arr = jnp.array(next_states)
-            terminals_arr = jnp.array(terminals, dtype=jnp.float32)
-
-            # batched training step
-            loss = train_step(network, optimizer, states_arr, actions_arr, rewards_arr, next_states_arr, terminals_arr, hyperparameters)
-            
-            tensorboard_writer.add_scalar("train/loss", float(loss), current_step)
 
         tensorboard_writer.add_scalar("Metrics/Episode_Reward", total_reward, episode)
+        tensorboard_writer.add_scalar("sanity-check/episode_length", float(episode_length), episode)
+        tensorboard_writer.add_scalar("sanity-check/episode_rollout_updates", float(rollout_updates), episode)
 
         
     pbar.close()
