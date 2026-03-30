@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import flax.nnx as nnx
 import jax
 import numpy as np
+from collections import deque
 from tqdm import tqdm
 import orbax.checkpoint as ocp
 from tensorboardX import SummaryWriter
@@ -17,16 +18,17 @@ from agent.actor_critic import ActorCriticNetwork, batched_loss_function
 hyperparameters = {
     "optimizer_lr": 1e-4,
     "gamma": 0.99,
-    "entropy_coef": 0.15,
+    "entropy_coef": 0.001,
     "num_envs": 64,
 }
 
 @nnx.jit
 def train_step(model: ActorCriticNetwork, optimizer: nnx.Optimizer, state, action, reward, next_state, terminal, hyperparameters):
-    grad_fn = nnx.value_and_grad(batched_loss_function)
-    loss, grads = grad_fn(model, state, action, reward, next_state, terminal, hyperparameters["gamma"], hyperparameters["entropy_coef"])
+    grad_fn = nnx.value_and_grad(batched_loss_function, has_aux=True)
+    (loss, aux), grads = grad_fn(model, state, action, reward, next_state, terminal, hyperparameters["gamma"], hyperparameters["entropy_coef"])
+    grad_norm = jnp.sqrt(sum(jnp.sum(jnp.square(g)) for g in jax.tree.leaves(grads)))
     optimizer.update(model, grads)
-    return loss
+    return loss, aux["entropy"], aux["critic_loss"], grad_norm
 
 ## Lunar Lander Constants
 LUNAR_LANDER_OBSERVATION_SPACE_DIM = 8
@@ -65,6 +67,8 @@ def train(
     pbar = tqdm(total=TOTAL_TRAINING_STEPS, desc="Training Lunar Lander")
     state, _ = env.reset()
     episode_rewards = np.zeros(hyperparameters["num_envs"], dtype=np.float32)
+    episode_lengths = np.zeros(hyperparameters["num_envs"], dtype=np.int32)
+    success_history = deque(maxlen=100)
 
     while current_step < TOTAL_TRAINING_STEPS:
         jax_key, subkey = jax.random.split(jax_key)
@@ -83,22 +87,35 @@ def train(
         terminals_arr = jnp.asarray(done.astype(np.float32))
 
         episode_rewards += reward
+        episode_lengths += 1
         finished_env_indices = np.flatnonzero(done)
         for env_idx in finished_env_indices:
             episode += 1
             ep_return = float(episode_rewards[env_idx])
+            ep_length = int(episode_lengths[env_idx])
+            success = ep_return >= 200.0
+            success_history.append(success)
+
             smoothed_return = ep_return if smoothed_return is None else (1 - smoothing_alpha) * smoothed_return + smoothing_alpha * ep_return
-            tensorboard_writer.add_scalar("Metrics/Episode_Reward", ep_return, episode)
+            tensorboard_writer.add_scalar("Metrics/Episode_Return", ep_return, episode)
             tensorboard_writer.add_scalar("Metrics/Smoothed_Episode_Reward", smoothed_return, episode)
+            tensorboard_writer.add_scalar("Metrics/Episode_Length", ep_length, episode)
+            tensorboard_writer.add_scalar("Metrics/Success_Rate", sum(success_history) / len(success_history) * 100, episode)
+
             episode_rewards[env_idx] = 0.0
+            episode_lengths[env_idx] = 0
 
         state = next_state
         step_increment = hyperparameters["num_envs"]
         current_step += step_increment
         pbar.update(min(step_increment, TOTAL_TRAINING_STEPS - pbar.n))
 
-        loss = train_step(network, optimizer, states_arr, actions_arr, rewards_arr, next_states_arr, terminals_arr, hyperparameters)
-        tensorboard_writer.add_scalar("train/loss", float(loss), current_step)
+        loss, entropy, critic_loss, grad_norm = train_step(network, optimizer, states_arr, actions_arr, rewards_arr, next_states_arr, terminals_arr, hyperparameters)
+        tensorboard_writer.add_scalar("Training/Loss", float(loss), current_step)
+        tensorboard_writer.add_scalar("Training/Gradient_Norm", float(grad_norm), current_step)
+        tensorboard_writer.add_scalar("Training/Learning_Rate", hyperparameters["optimizer_lr"], current_step)
+        tensorboard_writer.add_scalar("A2C/Policy_Entropy", float(entropy), current_step)
+        tensorboard_writer.add_scalar("A2C/Value_Function_Loss", float(critic_loss), current_step)
 
         if current_step >= next_checkpoint_step:
             network_state = nnx.state(network)

@@ -11,21 +11,22 @@ import time
 from pathlib import Path
 from tqdm import tqdm
 import yaml
+from collections import deque
 
 ## Lunar Lander Constants
 LUNAR_LANDER_OBSERVATION_SPACE_DIM = 8
 LUNAR_LANDER_ACTION_SPACE_SIZE = 4
-TOTAL_TRAINING_STEPS = 300_000
+TOTAL_TRAINING_STEPS = 50_000
 
 hyperparameters = {
-    "buffer_size": 10_000,
+    "buffer_size": 20_000,
     "epsilon_start": 0.9,
     "epsilon_end": 0.05,
-    "epsilon_decay_steps": 40_000,
+    "epsilon_decay_steps": 35_000,
     "learning_start_step": 1000,
-    "gamma": 0.999,
+    "gamma": 0.99,
     "mini_batch_size": 128,
-    "neural_network_update_step": 1000,
+    "neural_network_update_step": 500,
     "optimizer_lr": 5e-4,
 }
 
@@ -48,6 +49,8 @@ def train(
 
     current_step = 0
     episode = 0
+    smoothed_reward = 0.0
+    success_window = deque(maxlen=100)
 
     pbar = tqdm(total=TOTAL_TRAINING_STEPS, desc="Training Lunar Lander")
 
@@ -70,10 +73,9 @@ def train(
             jax_key, subkey = jax.random.split(jax_key)
             action = act_epsilon_greedy(subkey, q_values, epsilon=0)
             action = int(action)
-            tensorboard_writer.add_scalar("sanity-check/chosen-action", action, current_step)
+            tensorboard_writer.add_scalar("Training/chosen-action", action, current_step)
             
             next_state, reward, terminated, truncated, _ = env.step(action)
-            tensorboard_writer.add_scalar("train/step_reward", reward, current_step)
 
             buffer.add(
                 [
@@ -84,8 +86,6 @@ def train(
                     (truncated or terminated)
                 ]
             )
-
-            tensorboard_writer.add_scalar("buffer/size", len(buffer), current_step)
 
             if len(buffer) >= hyperparameters["learning_start_step"]:
                 jax_batch, sampled_indices = buffer.sample_jax(hyperparameters["mini_batch_size"])
@@ -111,9 +111,17 @@ def train(
 
             state = next_state
             total_reward += float(reward)
-        
-        tensorboard_writer.add_scalar("Metrics/Episode_Reward", float(total_reward), episode)
-        tensorboard_writer.add_scalar("Metrics/Episode_N_Steps", episode_step, episode)
+
+        # Episode metrics
+        smoothed_reward = smoothed_reward * 0.95 + total_reward * 0.05
+        success = terminated and total_reward >= 200
+        success_window.append(float(success))
+        success_rate = sum(success_window) / len(success_window) * 100
+
+        tensorboard_writer.add_scalar("Metrics/Episode_Return", float(total_reward), episode)
+        tensorboard_writer.add_scalar("Metrics/Smoothed_Episode_Reward", smoothed_reward, episode)
+        tensorboard_writer.add_scalar("Metrics/Episode_Length", episode_step, episode)
+        tensorboard_writer.add_scalar("Metrics/Success_Rate", success_rate, episode)
 
     pbar.close()
     env.close()
@@ -126,8 +134,6 @@ def perform_optimization_step(
     current_step,
     tensorboard_writer
 ):
-    tensorboard_writer.add_scalar("buffer/sampled-states-mean", float(jax_batch["states"].mean()), current_step)
-
     batch_targets = fun_batch_calculate_target_ddqn(
         acting_network,
         eval_network,
@@ -137,15 +143,22 @@ def perform_optimization_step(
         hyperparameters["gamma"]
         )
     
-    loss, qs, tdes = train_step(
+    loss, qs, tdes, grad_norm = train_step(
         acting_network,
         optimizer,
         jax_batch["states"],
         jax_batch["action"],
         batch_targets
     )
-    tensorboard_writer.add_scalar("train/loss", loss, current_step)
-    tensorboard_writer.add_scalar("train/tdes", jnp.mean(tdes), current_step)
+
+    tensorboard_writer.add_scalar("Training/Loss", float(loss), current_step)
+    tensorboard_writer.add_scalar("Training/Gradient_Norm", float(grad_norm), current_step)
+    tensorboard_writer.add_scalar("Training/Learning_Rate", hyperparameters["optimizer_lr"], current_step)
+
+    tensorboard_writer.add_scalar("DQN/Avg_Q_Value", float(jnp.mean(qs)), current_step)
+    tensorboard_writer.add_scalar("DQN/Max_Q_Value", float(jnp.max(qs)), current_step)
+    tensorboard_writer.add_scalar("DQN/TD_Error", float(jnp.mean(jnp.abs(tdes))), current_step)
+
     return loss, qs, tdes
 
 def setup_run_dir(run_name: str):

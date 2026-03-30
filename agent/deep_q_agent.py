@@ -107,8 +107,9 @@ def mse_loss(model, states, actions, targets):
 def train_step(model, optimizer, states, chosen_actions, targets):
     fun_inference_grad = nnx.value_and_grad(mse_loss, has_aux=True)
     (loss, (qs, tdes)), grad = fun_inference_grad(model, states, chosen_actions, targets)
+    grad_norm = jnp.sqrt(sum(jnp.sum(leaf ** 2) for leaf in jax.tree_util.tree_leaves(grad)))
     optimizer.update(model, grad)
-    return loss, qs, tdes
+    return loss, qs, tdes, grad_norm
 
 
 # calculate targets double DQN

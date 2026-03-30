@@ -16,17 +16,12 @@ class RingBuffer:
         self.tdes: List[int] = [0 for _ in range(self.max_size)]
 
     def add(self, item: Any):
-        if self.next_pos < self.max_size:
-            self.buffer[self.next_pos] = item
-            self.tdes[self.next_pos] = MAX_PROB_INT
-            self.next_pos += 1
-            self.current_buffer_length += 1
-            self.current_buffer_length = min(self.max_size, self.current_buffer_length)
-        else:
-            self.buffer[0] = item
-            self.next_pos = 1
+        self.buffer[self.next_pos] = item
+        self.tdes[self.next_pos] = MAX_PROB_INT
+        self.next_pos = (self.next_pos + 1) % self.max_size
+        self.current_buffer_length = min(self.current_buffer_length + 1, self.max_size)
         
-    def priority_sample(self, n, priorization_alpha=0.6, priorization_epsilon=1e-3):
+    def priority_sample(self, n, priorization_alpha=0.6, priorization_epsilon=1e-3, beta=0.4):
         size = self.current_buffer_length
         tdes = np.abs(self.tdes[:size]) + priorization_epsilon
     
@@ -36,21 +31,29 @@ class RingBuffer:
         probs = p / p.sum()
 
         indices = np.random.choice(size, n, replace=False, p=probs)
-        return [self.buffer[i] for i in indices], list(indices)
+
+        # Importance sampling weights to correct for sampling bias
+        # beta=1 fully corrects bias; normalize by max weight for stability
+        weights = (size * probs[indices]) ** (-beta)
+        weights /= weights.max()
+
+        return [self.buffer[i] for i in indices], list(indices), weights
     
     def store_tdes(self, sampled_indices, tdes):
+        tdes = np.array(tdes)  # pull off device once, avoid per-element sync
         for idx, tde in zip(sampled_indices, tdes):
-            self.tdes[idx] = tde
+            self.tdes[idx] = float(tde)
     
     def sample_jax(self, n:int):
-        m_batch, m_indices = self.priority_sample(n)
+        m_batch, m_indices, weights = self.priority_sample(n)
         states, actions, rewards, next_states, dones = zip(*m_batch)
         return {
             "states": jnp.array(states),
             "action": jnp.array(actions),
             "reward": jnp.array(rewards),
             "next_state": jnp.array(next_states),
-            "dones": jnp.array(dones, dtype=jnp.bool_)
+            "dones": jnp.array(dones, dtype=jnp.bool_),
+            "is_weights": jnp.array(weights, dtype=jnp.float32),
         }, m_indices
 
     

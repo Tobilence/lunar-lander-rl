@@ -45,14 +45,17 @@ def loss_fn(model: ActorCriticNetwork, state, action, reward, next_state, termin
     actor_loss = -log_prob_action * jax.lax.stop_gradient(td_error)
 
     probs = jax.nn.softmax(actor_logits)
-    entropy_loss = -jnp.sum(probs * log_probs) * entropy_coef
+    entropy = -jnp.sum(probs * log_probs)
+    entropy_loss = entropy * entropy_coef
 
     critic_loss = jnp.square(td_error)
 
-    return actor_loss + 0.5 * critic_loss - entropy_loss
+    total_loss = actor_loss + 0.5 * critic_loss - entropy_loss
+    return total_loss, {"entropy": entropy, "critic_loss": critic_loss}
 
 _batched_loss_fn = nnx.vmap(loss_fn, in_axes=(None, 0, 0, 0, 0, 0, None, None))
 
 # necessary to make the vector into a scaler, which is required for value_and_grad in the optimization step
 def batched_loss_function(model, states, actions, rewards, next_states, terminals, gamma, entropy_coef):
-    return _batched_loss_fn(model, states, actions, rewards, next_states, terminals, gamma, entropy_coef).mean()
+    losses, aux = _batched_loss_fn(model, states, actions, rewards, next_states, terminals, gamma, entropy_coef)
+    return losses.mean(), {k: v.mean() for k, v in aux.items()}

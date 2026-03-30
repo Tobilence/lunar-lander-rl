@@ -14,3 +14,6 @@ Learning Rate (bei entropy_coef = 0.2):
 zu klein -> 0.000001 (1e-6) policy lernt nie zu landen -> stuck bei smoothed return von -150
 optimal -> 0.0001 (1e-4)
 zu hoch -> 0.01 (1e-2) policy plumits to -600 avg return and is stuck there
+
+## Abgabe: DQN
+
