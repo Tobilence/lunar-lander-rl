@@ -18,7 +18,7 @@ def read_model_info(run_dir):
             return QNetwork, "function_approximation"
         if model == "NoisyDuelingQNetwork":
             return NoisyDuelingQNetwork, "function_approximation"
-        if model == "A2C":
+        if model == "ActorCriticNetwork":
             return ActorCriticNetwork, "policy_gradient"
         else: 
             raise Exception("unknown model name.")

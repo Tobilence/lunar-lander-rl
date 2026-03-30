@@ -4,6 +4,7 @@ import optax
 import jax.numpy as jnp
 import flax.nnx as nnx
 import jax
+import numpy as np
 from tqdm import tqdm
 import orbax.checkpoint as ocp
 from tensorboardX import SummaryWriter
@@ -14,11 +15,10 @@ from agent.actor_critic import ActorCriticNetwork, batched_loss_function
 
 
 hyperparameters = {
-    "optimizer_lr": 4e-5,
+    "optimizer_lr": 1e-4,
     "gamma": 0.99,
-    "entropy_coef": 0.1,
-    "epochs_per_episode": 10,
-    "rollout_length": 8,
+    "entropy_coef": 0.15,
+    "num_envs": 64,
 }
 
 @nnx.jit
@@ -31,7 +31,14 @@ def train_step(model: ActorCriticNetwork, optimizer: nnx.Optimizer, state, actio
 ## Lunar Lander Constants
 LUNAR_LANDER_OBSERVATION_SPACE_DIM = 8
 LUNAR_LANDER_ACTION_SPACE_SIZE = 4
-TOTAL_TRAINING_STEPS = 500_000
+TOTAL_TRAINING_STEPS = 500_000 * 10
+
+
+def make_env(render_mode=None):
+    def thunk():
+        return gym.make("LunarLander-v3", render_mode=render_mode)
+
+    return thunk
 
 
 ## Main Loop
@@ -41,78 +48,63 @@ def train(
         tensorboard_writer,
         render=True
     ):
-    mode = "human" if render else None
-    env = gym.make("LunarLander-v3", render_mode=mode)
-
-    # optimizer = nnx.Optimizer(acting_network, optax.adam(hyperparameters["optimizer_lr"]), wrt=nnx.Param)
-    jax_key = jax.random.key(0)
-    optimizer = optax.chain(
-        # 1. Clip the gradients so they don't exceed a total norm of 0.5
-        optax.clip_by_global_norm(0.5),
-        # 2. Apply the Adam optimizer logic
-        optax.adam(learning_rate=3e-4)
+    mode = "human" if render and hyperparameters["num_envs"] == 1 else None
+    env = gym.vector.AsyncVectorEnv(
+        [make_env(mode) for _ in range(hyperparameters["num_envs"])]
     )
-    optimizer = nnx.Optimizer(network, optimizer, wrt=nnx.Param)
+
+    jax_key = jax.random.key(0)
+    optimizer = nnx.Optimizer(network, optax.adam(learning_rate=hyperparameters["optimizer_lr"]), wrt=nnx.Param)
 
     current_step = 0
     episode = 0
+    next_checkpoint_step = 10_000
+    smoothed_return = None
+    smoothing_alpha = 0.05
 
     pbar = tqdm(total=TOTAL_TRAINING_STEPS, desc="Training Lunar Lander")
+    state, _ = env.reset()
+    episode_rewards = np.zeros(hyperparameters["num_envs"], dtype=np.float32)
 
     while current_step < TOTAL_TRAINING_STEPS:
-        # Reset returns (observation, info)
-        state, info = env.reset()
-        terminated = False
-        truncated = False
-        total_reward = 0
-        episode += 1
+        jax_key, subkey = jax.random.split(jax_key)
 
-        states, actions, rewards, next_states, terminals = [], [], [], [], []
+        actor_logits, _ = network(state)
+        action = jax.random.categorical(subkey, actor_logits, axis=-1)
+        action = np.asarray(action, dtype=np.int32)
 
-        while not (terminated or truncated):
-            # setup variables
-            jax_key, subkey = jax.random.split(jax_key)
-            current_step +=1
-            pbar.update(1)
+        next_state, reward, terminated, truncated, _ = env.step(action)
+        done = np.logical_or(terminated, truncated)
 
-            actor_logits, _ = network(state)
-            action = int(jax.random.categorical(subkey, actor_logits))
-            
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
+        states_arr = jnp.asarray(state)
+        actions_arr = jnp.asarray(action)
+        rewards_arr = jnp.asarray(reward, dtype=jnp.float32)
+        next_states_arr = jnp.asarray(next_state)
+        terminals_arr = jnp.asarray(done.astype(np.float32))
 
-            # Store the transition
-            states.append(state)
-            actions.append(action)
-            rewards.append(reward)
-            next_states.append(next_state)
-            terminals.append(1.0 if done else 0.0)
+        episode_rewards += reward
+        finished_env_indices = np.flatnonzero(done)
+        for env_idx in finished_env_indices:
+            episode += 1
+            ep_return = float(episode_rewards[env_idx])
+            smoothed_return = ep_return if smoothed_return is None else (1 - smoothing_alpha) * smoothed_return + smoothing_alpha * ep_return
+            tensorboard_writer.add_scalar("Metrics/Episode_Reward", ep_return, episode)
+            tensorboard_writer.add_scalar("Metrics/Smoothed_Episode_Reward", smoothed_return, episode)
+            episode_rewards[env_idx] = 0.0
 
-            state = next_state
-            total_reward += float(reward)
+        state = next_state
+        step_increment = hyperparameters["num_envs"]
+        current_step += step_increment
+        pbar.update(min(step_increment, TOTAL_TRAINING_STEPS - pbar.n))
 
-            if len(states) >= hyperparameters["rollout_length"] or done:
-                # Convert lists to JAX arrays
-                states_arr = jnp.array(states)
-                actions_arr = jnp.array(actions)
-                rewards_arr = jnp.array(rewards, dtype=jnp.float32)
-                next_states_arr = jnp.array(next_states)
-                terminals_arr = jnp.array(terminals, dtype=jnp.float32)
+        loss = train_step(network, optimizer, states_arr, actions_arr, rewards_arr, next_states_arr, terminals_arr, hyperparameters)
+        tensorboard_writer.add_scalar("train/loss", float(loss), current_step)
 
-                # batched training step
-                loss = train_step(network, optimizer, states_arr, actions_arr, rewards_arr, next_states_arr, terminals_arr, hyperparameters)
-                tensorboard_writer.add_scalar("train/loss", float(loss), current_step)
+        if current_step >= next_checkpoint_step:
+            network_state = nnx.state(network)
+            checkpoint_manager.save(current_step, network_state)
+            next_checkpoint_step += 10_000
 
-                states, actions, rewards, next_states, terminals = [], [], [], [], []
-
-
-            if current_step % 10_000 == 0:
-                network_state = nnx.state(network)
-                checkpoint_manager.save(current_step, network_state)
-
-        tensorboard_writer.add_scalar("Metrics/Episode_Reward", total_reward, episode)
-
-        
     pbar.close()
     env.close()
 
